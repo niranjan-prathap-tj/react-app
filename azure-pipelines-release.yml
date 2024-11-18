@@ -1,0 +1,145 @@
+# Node.js with React
+
+# Build a Node.js project that uses React.
+# Add steps that analyze code, save build artifacts, deploy, and more:
+# https://docs.microsoft.com/azure/devops/pipelines/languages/javascript
+
+trigger:
+  none
+
+pr: none
+
+pool:
+  vmImage: windows-latest
+
+variables:
+  gitEmail: $(GIT_EMAIL)
+  gitUser: $(GIT_USER)
+  gitToken: $(GIT_PAT)
+  buildEnv: $(BUILD_ENV)
+  
+steps:
+  - checkout: self
+    persistCredentials: true
+    displayName: "Code Checkout"
+
+  - task: NodeTool@0
+    inputs:
+      versionSpec: "18.17.1"
+    displayName: "Install Node.js"
+
+  - powershell: |
+      npm install
+    displayName: "Install dependencies"
+
+  - powershell: |
+      $sourceBranch = echo "$(Build.SourceBranchName)"
+      if (($sourceBranch).startsWith( "release-")) {
+        $tags = git tag
+        $packageJsonPath = "./package.json"
+        $packageJson = Get-Content -Path $packageJsonPath | Out-String | ConvertFrom-Json
+        $releaseVersion = $packageJson.Version
+        $gitTag = "release" + "-" + $releaseVersion
+        if((-not($tags.contains($gitTag))) -or ($sourceBranch -ne $gitTag)) {
+          $release_version = (npm version minor --no-git-tag-version).replace('v','')
+          write-host "##vso[task.setvariable variable=RELEASE_VERSION;]$release_version"
+        } else {
+          write-host "TAG - $gitTag already exists!"
+          exit 1
+        }
+      } else {
+        Write-Error "Use Only release branches to create release cut!"
+        exit 0
+      }
+    displayName: Update Release Version
+    condition: ne(variables['BUILD_ENV'], 'PROD')
+
+  - powershell: |
+      $buildEnv = $env:BUILD_ENV
+      write-host "Build Environment: $buildEnv"
+      if ($buildEnv -eq "UAT") {
+        write-host "Release Version is: $env:RELEASE_VERSION"
+      } elseif ($buildEnv -eq "PROD") {
+        $packageJsonPath = "./package.json"
+        $packageJson = Get-Content -Path $packageJsonPath | Out-String | ConvertFrom-Json
+        $releaseVersion = $packageJson.Version
+        write-host "##vso[task.setvariable variable=RELEASE_VERSION;]$releaseVersion"
+        write-host "Release Version is $env:RELEASE_VERSION"
+      }
+      echo "$(Build.SourceBranchName)"
+    displayName: "Print Release Version"
+    
+  - powershell:  |
+      write-host "Build React App version $env:RELEASE_VERSION"
+      npm run build
+    displayName: "Build React Application"
+  
+  - powershell: |
+      get-childitem 
+    displayName: "List all files source directory"
+
+  - powershell: |
+      $buildId = echo "$(Build.BuildId)"
+      $artifactName = $env:APP_NAME + "-" + $env:RELEASE_VERSION + "-" + $env:BUILD_ENV + "-" + $buildId
+      write-host "##vso[task.setvariable variable=ARTIFACT_NAME;]$artifactName"
+    displayName: "Set Artifact Name"
+
+  - task: PublishPipelineArtifact@1
+    inputs:
+      targetPath: '$(Build.SourcesDirectory)/build'
+      artifact: '$(ARTIFACT_NAME)'
+      publishLocation: 'pipeline'
+
+  - powershell: |
+      $sourceBranch = "$(Build.SourceBranchName)"
+      $repoDir = "$(Build.SourcesDirectory)"
+      $releaseVersion = "$(RELEASE_VERSION)"
+      $gitUser = "$(gitUser)"
+      $gitEmail = "$(gitEmail)"
+      $gitPAT = "$(GIT_PAT)" # The PAT stored as a secure variable in Azure DevOps
+    
+      # Move to the repository directory
+      Set-Location -Path $repoDir
+
+      # Configure Git user information
+      git config --global user.name $gitUser
+      git config --global user.email $gitEmail
+
+      # Set the remote URL with PAT for authentication
+      #git remote set-url origin "https://${gitUser}:${gitPAT}@dev.azure.com/niranjanprathap007/myfirstapp/_git/ReactApp"
+
+      # Create and push the Git tag
+      git fetch origin $sourceBranch
+      git checkout $sourceBranch
+      $gitTag = "release-" + $releaseVersion
+      $tags = git tag
+      if (-not ($tags.contains($gitTag))) {
+        #Commit the changes
+        write-host "Commit the changes to $sourceBranch"
+        git status
+        git add .
+        git commit -m "Release Version - $releaseVersion"
+        git push origin $sourceBranch
+        write-host "Create and Push Tag to $sourceBranch"
+        git tag -a $gitTag -m "Release $releaseVersion"
+        git push origin tag $gitTag 
+        
+        #Rebase with Ongoing
+        write-host "Rebase $sourceBranch with ongoing"
+        git fetch origin $sourceBranch ongoing
+        git checkout ongoing
+        git pull origin $sourceBranch
+        git push origin ongoing 
+      } else {
+        write-host "TAG - $gitTag already exists!"
+        exit 1
+      }
+      
+    env:
+      GIT_PAT: $(GIT_PAT) # Secure pipeline variable for the PAT
+    condition: and(succeeded(), ne(variables['BUILD_ENV'], 'PROD'))
+
+
+    
+
+
